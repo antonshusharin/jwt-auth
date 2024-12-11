@@ -42,13 +42,18 @@ func AppFromEnvironment() (*App, error) {
 	}
 	dbErr := db.Ping(context.Background())
 	if dbErr != nil {
-		return nil, dbErr
+		return nil, errors.Join(errors.New("unable to connect to database"), dbErr)
+	}
+
+	err = TryInitDb(db)
+	if err != nil {
+		return nil, errors.Join(errors.New("unable to initialize database"), err)
 	}
 
 	signingKey := GetEnvRequired("JWT_SIGNING_KEY")
 	keyBytes, err := base64.StdEncoding.DecodeString(signingKey)
 	if err != nil {
-		return nil, errors.Join(errors.New("Unable to decode the signing key"), err)
+		return nil, errors.Join(errors.New("unable to decode the signing key"), err)
 	}
 
 	app := App{router: gin.Default(), db: db, jwtContext: NewJWTContext(keyBytes)}
