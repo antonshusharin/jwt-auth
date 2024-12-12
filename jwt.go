@@ -14,12 +14,15 @@ func NewJWTContext(signingKey []byte) *JWTContext {
 	return &JWTContext{signingKey, parser, signingMethod}
 }
 
-func (ctx *JWTContext) ParseToken(token string) *jwt.Token {
-	// TODO
-	return new(jwt.Token)
+func (ctx *JWTContext) ParseToken(token string) (*jwt.Token, error) {
+	return ctx.parser.Parse(token, ctx.keyFunc)
 }
 
-func (ctx *JWTContext) MakeToken(sub, refr string) string {
-	// TODO
-	return ""
+func (ctx *JWTContext) keyFunc(token *jwt.Token) (interface{}, error) {
+	return ctx.signingKey, nil
+}
+
+func (ctx *JWTContext) MakeToken(sub, refr string) (string, error) {
+	token := jwt.NewWithClaims(ctx.signingMethod, jwt.MapClaims{"sub": sub, "refr": refr})
+	return token.SignedString(ctx.signingKey)
 }
