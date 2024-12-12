@@ -4,4 +4,4 @@ CREATE TABLE IF NOT EXISTS users (
     email text
 );
 
-CREATE TABLE IF NOT EXISTS refresh_tokens (hash text PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS refresh_tokens (refresh_id uuid PRIMARY KEY, hash text);
