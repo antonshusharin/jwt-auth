@@ -10,7 +10,9 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -78,6 +80,27 @@ func (app *App) SignalError(c *gin.Context, err error) {
 	log.Printf("Error: %v", err.Error())
 }
 
+func (app *App) generateTokenPair(conn *pgxpool.Conn, userGuid uuid.UUID, clientIP string) (*TokenPair, error) {
+	refr := uuid.New()
+	token, err := app.jwtContext.MakeToken(userGuid.String(), refr.String())
+	if err != nil {
+		return nil, err
+	}
+
+	refreshToken := RefreshToken{RefreshUUID: refr, ClientIp: clientIP}
+	hash, err := refreshToken.HashBcrypt()
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = conn.Exec(context.Background(), "INSERT INTO refresh_tokens (refresh_id, hash) VALUES ($1, $2)", refr, hash)
+	if err != nil {
+		return nil, err
+	}
+	tokenPair := TokenPair{Access: token, Refresh: refreshToken}
+	return &tokenPair, nil
+}
+
 func (app *App) HandleGetToken(c *gin.Context) {
 	var guid struct {
 		Guid uuid.UUID `json:"guid"`
@@ -103,29 +126,80 @@ func (app *App) HandleGetToken(c *gin.Context) {
 		return
 	}
 
-	refr := uuid.New()
-	token, err := app.jwtContext.MakeToken(guid.Guid.String(), refr.String())
+	tokenPair, err := app.generateTokenPair(conn, guid.Guid, c.ClientIP())
 	if err != nil {
 		app.SignalError(c, err)
 		return
 	}
-
-	refreshToken := RefreshToken{RefreshUUID: refr, ClientIp: c.ClientIP()}
-	hash, err := refreshToken.HashBcrypt()
-	if err != nil {
-		app.SignalError(c, err)
-		return
-	}
-
-	_, err = conn.Exec(context.Background(), "INSERT INTO refresh_tokens (refresh_id, hash) VALUES ($1, $2)", refr, hash)
-	if err != nil {
-		app.SignalError(c, err)
-	}
-	tokenPair := TokenPair{Access: token, Refresh: refreshToken}
 	c.JSON(http.StatusOK, &tokenPair)
 }
 
 func (app *App) HandleRefreshToken(c *gin.Context) {
-	// TODO
-	c.Status(http.StatusNotImplemented)
+	var tokenPair TokenPair
+	err := c.BindJSON(&tokenPair)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"detail": "Bad request"})
+		return
+	}
+
+	accessToken, err := app.jwtContext.ParseToken(tokenPair.Access)
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"detail": "Invalid token"})
+		return
+	}
+	claims := accessToken.Claims.(jwt.MapClaims)
+	refr := claims["refr"]
+	sub := claims["sub"].(string)
+	if refr != tokenPair.Refresh.RefreshUUID.String() {
+		c.JSON(http.StatusForbidden, gin.H{"detail": "Invalid token"})
+		return
+	}
+
+	conn, err := app.db.Acquire(context.Background())
+	if err != nil {
+		app.SignalError(c, err)
+		return
+	}
+	defer conn.Release()
+	var hash []byte
+	err = conn.QueryRow(context.Background(), "SELECT hash FROM refresh_tokens WHERE refresh_id = $1", refr).Scan(&hash)
+	if errors.Is(err, pgx.ErrNoRows) {
+		c.JSON(http.StatusForbidden, gin.H{"detail": "Invalid token"})
+		return
+	}
+	if err != nil {
+		app.SignalError(c, err)
+		return
+	}
+
+	err = tokenPair.Refresh.ValidateHash(hash)
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"detail": "Invalid token"})
+		return
+	}
+
+	tx, err := conn.Begin(context.Background())
+	if err != nil {
+		app.SignalError(c, err)
+		return
+	}
+	defer tx.Rollback(context.Background())
+	_, err = tx.Exec(context.Background(), "DELETE FROM refresh_tokens WHERE refresh_id = $1", refr)
+	if err != nil {
+		app.SignalError(c, err)
+		return
+	}
+
+	newTokenPair, err := app.generateTokenPair(conn, uuid.MustParse(sub), c.ClientIP())
+	if err != nil {
+		app.SignalError(c, err)
+		return
+	}
+
+	err = tx.Commit(context.Background())
+	if err != nil {
+		app.SignalError(c, err)
+	}
+
+	c.JSON(http.StatusOK, newTokenPair)
 }
