@@ -7,15 +7,13 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 )
 
 type TokenPair struct {
-	Access       string       `json:"access"`
-	AccessParsed *jwt.Token   `json:"-"`
-	Refresh      RefreshToken `json:"refresh"`
+	Access  string       `json:"access"`
+	Refresh RefreshToken `json:"refresh"`
 }
 
 type RefreshToken struct {
@@ -57,7 +55,7 @@ func (token *RefreshToken) fromBase64(encoded string) error {
 	return nil
 }
 
-func (token *RefreshToken) MarshalJSON() ([]byte, error) {
+func (token RefreshToken) MarshalJSON() ([]byte, error) {
 	ret, err := json.Marshal(token.toBase64())
 	return ret, err
 }

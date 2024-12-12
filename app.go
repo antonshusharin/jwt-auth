@@ -5,10 +5,12 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -71,9 +73,56 @@ func (app *App) Run() {
 	app.router.Run("0.0.0.0:5000")
 }
 
+func (app *App) SignalError(c *gin.Context, err error) {
+	c.JSON(http.StatusInternalServerError, gin.H{"detail": "Internal server error"})
+	log.Printf("Error: %v", err.Error())
+}
+
 func (app *App) HandleGetToken(c *gin.Context) {
-	// TODO
-	c.Status(http.StatusNotImplemented)
+	var guid struct {
+		Guid uuid.UUID `json:"guid"`
+	}
+	err := c.BindJSON(&guid)
+	if err != nil {
+		return
+	}
+	conn, err := app.db.Acquire(context.Background())
+	if err != nil {
+		app.SignalError(c, err)
+		return
+	}
+	defer conn.Release()
+	var userExists bool
+	err = conn.QueryRow(context.Background(), "SELECT EXISTS (SELECT * FROM users WHERE guid = $1)", guid.Guid).Scan(&userExists)
+	if err != nil {
+		app.SignalError(c, err)
+		return
+	}
+	if !userExists {
+		c.JSON(http.StatusNotFound, gin.H{"detail": "User does not exist"})
+		return
+	}
+
+	refr := uuid.New()
+	token, err := app.jwtContext.MakeToken(guid.Guid.String(), refr.String())
+	if err != nil {
+		app.SignalError(c, err)
+		return
+	}
+
+	refreshToken := RefreshToken{RefreshUUID: refr, ClientIp: c.ClientIP()}
+	hash, err := refreshToken.HashBcrypt()
+	if err != nil {
+		app.SignalError(c, err)
+		return
+	}
+
+	_, err = conn.Exec(context.Background(), "INSERT INTO refresh_tokens (refresh_id, hash) VALUES ($1, $2)", refr, hash)
+	if err != nil {
+		app.SignalError(c, err)
+	}
+	tokenPair := TokenPair{Access: token, Refresh: refreshToken}
+	c.JSON(http.StatusOK, &tokenPair)
 }
 
 func (app *App) HandleRefreshToken(c *gin.Context) {
