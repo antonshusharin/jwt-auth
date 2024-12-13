@@ -8,18 +8,22 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jordan-wright/email"
 )
 
 type App struct {
 	router     *gin.Engine
 	db         *pgxpool.Pool
 	jwtContext *JWTContext
+	mailer     Mailer
 }
 
 func AppFromEnvironment() (*App, error) {
@@ -60,10 +64,44 @@ func AppFromEnvironment() (*App, error) {
 		return nil, errors.Join(errors.New("unable to decode the signing key"), err)
 	}
 
-	app := App{router: gin.Default(), db: db, jwtContext: NewJWTContext(keyBytes)}
+	mailer, err := initMailer()
+	if err != nil {
+		return nil, errors.Join(errors.New("unable to initialize the email backend"), err)
+	}
+
+	app := App{router: gin.Default(), db: db, jwtContext: NewJWTContext(keyBytes), mailer: mailer}
 	app.registerRoutes()
 	app.router.HandleMethodNotAllowed = true
 	return &app, nil
+}
+
+func initMailer() (Mailer, error) {
+	if testing.Testing() {
+		return new(TestingMailer), nil
+	}
+
+	serverAddr := GetEnvOptional("JWT_SMTP_ADDR", "")
+	if serverAddr == "" {
+		log.Print("Warning: the environment variable 'JWT_SMTP_ADDR' was not set, the service will not be able to send email")
+		return nil, nil
+	}
+	username := GetEnvOptional("JWT_SMTP_USERNAME", "")
+	if username == "" {
+		log.Print("Warning: the environment variable 'JWT_SMTP_USERNAME' was not set, the service will not be able to send email")
+		return nil, nil
+	}
+	password := GetEnvOptional("JWTP_SMTP_PASSWORD", "")
+	if password == "" {
+		log.Print("Warning: the environment variable 'JWT_SMTP_PASSWORD' was not set, the service will not be able to send email")
+		return nil, nil
+	}
+	serviceEmail := GetEnvOptional("JWTP_SMTP_SERVICE_EMAIL", "")
+	if serviceEmail == "" {
+		log.Print("Warning: the environment variable 'JWT_SMTP_SERVICE_EMAIL' was not set, the service will not be able to send email")
+		return nil, nil
+	}
+
+	return NewSMTPMailer(serverAddr, username, password, serviceEmail)
 }
 
 func (app *App) registerRoutes() {
@@ -161,6 +199,18 @@ func (app *App) HandleRefreshToken(c *gin.Context) {
 		return
 	}
 	defer conn.Release()
+
+	var username, userEmail string
+	err = conn.QueryRow(context.Background(), "SELECT username, email FROM users WHERE guid = $1", sub).Scan(&username, &userEmail)
+	if errors.Is(err, pgx.ErrNoRows) {
+		c.JSON(http.StatusForbidden, gin.H{"detail": "Invalid token"})
+		return
+	}
+	if err != nil {
+		app.SignalError(c, err)
+		return
+	}
+
 	var hash []byte
 	err = conn.QueryRow(context.Background(), "SELECT hash FROM refresh_tokens WHERE refresh_id = $1", refr).Scan(&hash)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -202,4 +252,32 @@ func (app *App) HandleRefreshToken(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, newTokenPair)
+
+	if c.ClientIP() != tokenPair.Refresh.ClientIp {
+		go app.sendEmailWarning(username, userEmail, c.ClientIP())
+	}
+}
+
+func (app *App) sendEmailWarning(username, userEmail, newIP string) {
+	if app.mailer == nil {
+		return
+	}
+
+	subject := "Подозрительные действия"
+	content := fmt.Sprintf(`%v,
+Мы обнаружили вход в вашу учётную запись с нового IP-адреса.
+
+Время: %v
+IP: %v
+
+Если это не вы, обратитесь, пожалуйста, в службу поддержки`, username, time.Now().Format("15:04, 02.01.2006"), newIP)
+
+	email := email.NewEmail()
+	email.Subject = subject
+	email.Text = []byte(content)
+	email.To = []string{userEmail}
+	err := app.mailer.SendEmail(email)
+	if err != nil {
+		log.Printf("Error sending warning email to %v: %v", userEmail, err.Error())
+	}
 }
