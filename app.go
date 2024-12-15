@@ -85,9 +85,9 @@ func initMailer() (Mailer, error) {
 		log.Print("Warning: the environment variable 'JWT_SMTP_ADDR' was not set, the service will not be able to send email")
 		return nil, nil
 	}
-	username := GetEnvOptional("JWT_SMTP_USERNAME", "")
+	username := GetEnvOptional("JWT_SMTP_USER", "")
 	if username == "" {
-		log.Print("Warning: the environment variable 'JWT_SMTP_USERNAME' was not set, the service will not be able to send email")
+		log.Print("Warning: the environment variable 'JWT_SMTP_USER' was not set, the service will not be able to send email")
 		return nil, nil
 	}
 	password := GetEnvOptional("JWTP_SMTP_PASSWORD", "")
